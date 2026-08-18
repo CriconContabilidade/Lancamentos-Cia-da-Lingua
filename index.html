@@ -314,6 +314,15 @@ function toDateParts(v){
   return null;
 }
 function ultimoDiaMes(y,m){ return new Date(y,m,0).getDate(); }
+// "Pix - Recebido" tem hífen/espaços entre as palavras no extrato — remove tudo
+// que não é letra/número antes de comparar, senão "PIX RECEBIDO" (sem hífen)
+// nunca bate como substring. Usado tanto pra excluir esses recebimentos dos
+// Lançamentos (vão pra Baixa de Serviços) quanto pelo motor de baixa em si.
+function flatText(s){ return normalizeText(s).replace(/[^A-Z0-9]/g,""); }
+function isRecebimentoCliente(historico){
+  const h = flatText(historico);
+  return h.includes("PIXRECEBIDO") || h.includes("TRANSFERENCIARECEBIDA") || h==="COBRANCA";
+}
 // "anterior" = mês/ano do lançamento é o mês ANTERIOR ao do pagamento; "atual" = mesmo mês.
 function mesAnoRef(data, periodo){
   let m = data.m, y = data.y;
@@ -686,6 +695,12 @@ function buildBancoEntries(linhas, bankConta){
       rows.push({data:l.data, debito:simples.debito, credito:bankConta, valor:l.valor, hist:simples.hist, complemento:null, iniciaLote:1, flag:false, statusText:"OK (padrão cadastrado)", origem:"banco"});
       return;
     }
+    // Recebimento de cliente (Pix Recebido/Transferência recebida/Cobrança) que não seja
+    // da Louise fica de fora dos Lançamentos — é a Baixa de Serviços que cuida disso, e
+    // duplicar aqui como pendência só gera ruído sem serventia.
+    if(l.tipo==="C" && isRecebimentoCliente(l.historico) && !norm.includes("LOUISE")){
+      ignoradas++; return;
+    }
     // fallback: não reconhecido — só a conta banco é preenchida, resto à mão
     const d = l.tipo==="D" ? null : bankConta;
     const c = l.tipo==="D" ? bankConta : null;
@@ -773,10 +788,10 @@ function renderLancTable(){
     ${sortTh('lancTableState',lancTableState,'debito','Débito','renderLancTable')}
     ${sortTh('lancTableState',lancTableState,'credito','Crédito','renderLancTable')}
     ${sortTh('lancTableState',lancTableState,'valor','Valor','renderLancTable')}
-    <th>Histórico / Complemento</th><th>Origem</th><th>Status</th>
+    <th>Histórico / Complemento</th><th>Origem</th><th>Status</th><th>Incluir</th>
   </tr></thead><tbody>`;
   indexed.forEach(({row:r, idx:i})=>{
-    html += `<tr class="${r.flag?'flag':''}">
+    html += `<tr class="${r.flag?'flag':''}${r.incluir===false?' excluded':''}">
       <td class="cell"><input class="cell-input" value="${r.data?fmtDateBR(r.data):''}" onchange="updateLancRow(${i},'data',this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:60px" value="${r.debito??''}" onchange="updateLancRow(${i},'debito',this.value)"></td>
       <td class="cell"><input class="cell-input" style="width:60px" value="${r.credito??''}" onchange="updateLancRow(${i},'credito',this.value)"></td>
@@ -784,6 +799,7 @@ function renderLancTable(){
       <td class="cell"><input class="cell-input wide" value="${r.hist||r.complemento||''}" onchange="updateLancRow(${i},'complemento',this.value)"></td>
       <td style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-soft);">${r.origem||''}</td>
       <td>${r.statusText||''}</td>
+      <td style="text-align:center"><input type="checkbox" ${r.incluir===false?'':'checked'} onchange="toggleLancRow(${i},this.checked)"></td>
     </tr>`;
   });
   html += `</tbody></table></div>
@@ -801,20 +817,23 @@ function updateLancRow(i, field, val){
   else if(field==="complemento"){ r.complemento = val; r.hist = null; }
   if(r.debito!=null && r.credito!=null && r.data && (r.hist || r.complemento)) r.flag = false;
 }
+function toggleLancRow(i, checked){ lancRowsState[i].incluir = checked; }
 const LANC_HEADER = ["Data","Débito","Crédito","Valor","Cód. Hist.","Complemento Histórico","Inicia Lote","Código Emp.","Centro de Custo Débito","Centro de Custo Crédito"];
 function lancRowArray(r){
   const codEmp = document.getElementById("codEmp").value.trim();
   return [r.data?fmtDateBR(r.data):"", r.debito??"", r.credito??"", r.valor, "", r.hist||r.complemento||"", r.iniciaLote??"", codEmp, "", ""];
 }
 function downloadLancXlsx(){
-  downloadXlsx("cia_da_lingua_lancamentos.xlsx", [LANC_HEADER, ...lancRowsState.map(lancRowArray)], "Lancamentos");
+  const usaveis = lancRowsState.filter(r=>r.incluir!==false);
+  downloadXlsx("cia_da_lingua_lancamentos.xlsx", [LANC_HEADER, ...usaveis.map(lancRowArray)], "Lancamentos");
 }
 function downloadLancTxt(){
-  const pendentes = lancRowsState.filter(r=>r.flag);
+  const usaveis = lancRowsState.filter(r=>r.incluir!==false);
+  const pendentes = usaveis.filter(r=>r.flag);
   if(pendentes.length){
     if(!confirm(`${pendentes.length} linha(s) ainda marcada(s) pra conferir (conta em branco ou sem data). Gerar mesmo assim?`)) return;
   }
-  const lines = lancRowsState.map(r=> lancRowArray(r).map((v,i)=> i===3 ? fmtValorTxt(v) : (i===5 ? stripAccents(v) : v)).join(";"));
+  const lines = usaveis.map(r=> lancRowArray(r).map((v,i)=> i===3 ? fmtValorTxt(v) : (i===5 ? stripAccents(v) : v)).join(";"));
   downloadTextAnsi("cia_da_lingua_lanctos.txt", lines.join("\r\n") + "\r\n");
 }
 
@@ -941,19 +960,11 @@ function matchBaixaServicos(linhasExtrato, titulosAbertosIn){
     if(da!==db) return da-db;
     return String(a.documento).localeCompare(String(b.documento), undefined, {numeric:true});
   };
-  // "Pix - Recebido" tem hífen/espaços entre as palavras no extrato — remove tudo
-  // que não é letra/número antes de comparar, senão "PIX RECEBIDO" (sem hífen)
-  // nunca bate como substring e a linha inteira passa batido sem gerar baixa.
-  const flat = s => normalizeText(s).replace(/[^A-Z0-9]/g,"");
-  const linhasCandidatas = linhasExtrato.filter(l=>{
-    if(l.tipo!=="C") return false;
-    const h = flat(l.historico);
-    return h.includes("PIXRECEBIDO") || h.includes("TRANSFERENCIARECEBIDA") || h==="COBRANCA";
-  });
+  const linhasCandidatas = linhasExtrato.filter(l=> l.tipo==="C" && isRecebimentoCliente(l.historico));
   const resultados = [];
   const pendentesCobranca = [];
   linhasCandidatas.forEach(l=>{
-    const isCobranca = flat(l.historico) === "COBRANCA";
+    const isCobranca = flatText(l.historico) === "COBRANCA";
     if(!isCobranca){
       const nomeExtrato = extractPayerName(l.nomeFrag);
       let candidatos = titulos.filter(t=>!t._used).map(t=>({t, score:scoreNomeMatch(nomeExtrato, t.nome)})).filter(x=>x.score>0);
