@@ -117,7 +117,7 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   <div class="topbar">
     <div class="brand">
       <h1>Lançamentos Cia da Língua</h1>
-      <div class="sub">Processamento 100% local no navegador — lê a planilha de Contas Pagas do mês, o extrato da Aplicação (BB CDB DI) e o extrato da conta corrente (Banco do Brasil), e gera os lançamentos de razão pro Domínio (mesmo layout usado nas outras ferramentas do Hub).</div>
+      <div class="sub">Processamento 100% local no navegador — lê a planilha de Contas Pagas do mês, o extrato da Aplicação (BB CDB DI) e o extrato da conta corrente (Banco do Brasil), gera os lançamentos de razão e a baixa de serviços recebidos pro Domínio (mesmo layout usado nas outras ferramentas do Hub). O cadastro de CNPJ de clientes é compartilhado com o resto do escritório <span id="cloudStatus" class="badge info">Conectando…</span></div>
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;">
       <a class="backlink" href="https://criconcontabilidade.github.io/Cricon-Ferramentas/" onclick="window.close(); setTimeout(function(){ location.href='https://criconcontabilidade.github.io/Cricon-Ferramentas/'; }, 250); return false;" id="hubLink">← Hub de Ferramentas</a>
@@ -157,6 +157,34 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   </div>
 
   <div class="card hidden" id="resultCard"></div>
+
+  <!-- ===================== BAIXA DE SERVIÇOS ===================== -->
+  <div class="card">
+    <div class="section-title">Baixa de Serviços (recebimentos de clientes)</div>
+    <div class="help">Casa os recebimentos do extrato da conta corrente com o relatório <b>Contas a Receber por Cliente</b> do Domínio, nesta ordem: <b>1)</b> nome do pagador no extrato igual ao nome da parcela, <b>2)</b> sobrenome igual, <b>3)</b> valor recebido igual ao valor da parcela, <b>4)</b> para lançamentos "Cobrança" (que juntam várias parcelas num só valor), decompõe quais parcelas compõem a soma seguindo a ordem de emissão das notas fiscais, descartando as já casadas nos passos anteriores. Gera <code>baixa_ser.txt</code>.</div>
+    <div class="field-row">
+      <div class="field">
+        <label>Contas a Receber por Cliente (PDF)</label>
+        <div class="dropzone small-drop" id="contasReceberDrop"><div class="big">Arraste o PDF aqui</div><div class="small">Lê sozinho a empresa (CNPJ) do cabeçalho do relatório</div><input type="file" id="contasReceberFile" accept="application/pdf"></div>
+      </div>
+      <div class="field">
+        <label>Extrato Conta Corrente BB (PDF)</label>
+        <div class="dropzone small-drop" id="extratoServicosDrop"><div class="big">Arraste o PDF aqui</div><div class="small">Pode ser o mesmo extrato usado nos lançamentos acima</div><input type="file" id="extratoServicosFile" accept="application/pdf"></div>
+      </div>
+    </div>
+    <div class="btn-row"><button class="btn" id="processServicosBtn" disabled onclick="processarBaixaServicos()">Processar</button></div>
+    <div id="servicosStatus" class="status-line hidden"></div>
+  </div>
+
+  <div class="card hidden" id="resultServicosCard"></div>
+
+  <!-- ===================== CADASTRO CNPJ (fallback) ===================== -->
+  <div class="card hidden" id="cnpjHelperCard">
+    <div class="section-title">CNPJs não encontrados — importar cadastro</div>
+    <div class="help">Sobraram clientes sem CNPJ resolvido. Solte aqui o relatório de <b>Clientes</b> do Domínio <b id="cnpjHelperEmpresa"></b> — já sei o CNPJ da Cia da Língua pelo relatório de Contas a Receber, então não precisa digitar nada. Isso atualiza o cadastro compartilhado do escritório e já resolve as linhas pendentes na hora.</div>
+    <div class="dropzone small-drop" id="cadPdfDrop"><div class="big">Arraste o PDF de Clientes aqui</div><input type="file" id="cadPdfFile" accept="application/pdf"></div>
+    <div id="cadPdfStatus" class="status-line hidden"></div>
+  </div>
 
   <!-- ===================== CADASTRO: CATEGORIAS DA PLANILHA DE CONTAS PAGAS ===================== -->
   <div class="card">
@@ -778,6 +806,521 @@ function downloadLancTxt(){
 
 renderCategoriasTable();
 renderIgnorarTable();
+
+/* =========================================================================
+   BAIXA DE SERVIÇOS — recebimentos de clientes (extrato × Contas a Receber)
+   ========================================================================= */
+function onlyDigits2(s){ return (s||"").toString().replace(/\D/g,""); }
+function mod11Digit(nums, weights){
+  let total = 0;
+  for(let i=0;i<nums.length;i++) total += nums[i]*weights[i];
+  const r = total % 11;
+  return r<2 ? 0 : 11-r;
+}
+function isValidCPF(digits){
+  const d = onlyDigits2(digits);
+  if(d.length!==11 || /^(\d)\1{10}$/.test(d)) return false;
+  const nums = d.split("").map(Number);
+  const dv1 = mod11Digit(nums.slice(0,9), [10,9,8,7,6,5,4,3,2]);
+  const dv2 = mod11Digit(nums.slice(0,9).concat([dv1]), [11,10,9,8,7,6,5,4,3,2]);
+  return nums[9]===dv1 && nums[10]===dv2;
+}
+function isValidCNPJ(digits){
+  const d = onlyDigits2(digits);
+  if(d.length!==14 || /^(\d)\1{13}$/.test(d)) return false;
+  const nums = d.split("").map(Number);
+  const w1 = [5,4,3,2,9,8,7,6,5,4,3,2];
+  const w2 = [6,5,4,3,2,9,8,7,6,5,4,3,2];
+  const dv1 = mod11Digit(nums.slice(0,12), w1);
+  const dv2 = mod11Digit(nums.slice(0,12).concat([dv1]), w2);
+  return nums[12]===dv1 && nums[13]===dv2;
+}
+function classifyDocumento(digits){
+  const d = onlyDigits2(digits);
+  if(d.length===14) return {tipo:"CNPJ", valido:isValidCNPJ(d)};
+  if(d.length===11) return {tipo:"CPF", valido:isValidCPF(d)};
+  return {tipo:null, valido:false};
+}
+
+/* ---- Contas a Receber por Cliente (PDF do Domínio) — mesmo parser da Baixas-Parcelas ---- */
+const EMPRESA_RE = /^Empresa:\s*(.+?)\s+P.gina/i;
+const CNPJ_HEADER_RE = /CNPJ:\s*([\d.\/-]{14,18})/;
+const GROUP_RE = /^(Cliente|Fornecedor):\s*(\d+)\s*-\s*(.+)$/;
+const TITULO_RE = /^(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+\d{2}\/\d{2}\/\d{4}\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+[\d.,]+\s+[\d.,]+\s*(Aberta|Parcial|Baixada|Recebida|Paga)$/;
+async function parseContasReceberPdf(file){
+  const pages = await extractPdfAllLines(file);
+  const allLines = pages.flat();
+  const fullText = allLines.join("\n");
+  let empresaNome = null, empresaCnpj = null;
+  const em = fullText.match(EMPRESA_RE);
+  if(em) empresaNome = em[1].trim();
+  const cm = fullText.match(CNPJ_HEADER_RE);
+  if(cm) empresaCnpj = onlyDigits2(cm[1]);
+  const titulos = [];
+  let codigo = null, nomeParceiro = null;
+  allLines.forEach(line=>{
+    const gm = line.match(GROUP_RE);
+    if(gm){ codigo = gm[2]; nomeParceiro = gm[3].trim(); return; }
+    if(/^Sub Total/i.test(line) || /^Total Geral/i.test(line) || /^Documento/i.test(line)) return;
+    const tm = line.match(TITULO_RE);
+    if(tm && codigo!=null){
+      titulos.push({ codigo, nome: nomeParceiro, documento: tm[1], emissao: brParts(tm[2]), vencimento: brParts(tm[3]), valorParcela: parseBRL(tm[4]), valorBaixado: parseBRL(tm[5]), situacao: tm[6] });
+    }
+  });
+  return {empresaNome, empresaCnpj, titulos};
+}
+
+/* ---- Motor de casamento por dígito-a-dígito exato (empréstimo entre parcelas de uma "Cobrança") ---- */
+function dpSubsetExact(pool, targetCents){
+  const n = pool.length;
+  const vals = pool.map(p=>p._cents);
+  const order = [...Array(n).keys()].sort((a,b)=>vals[b]-vals[a]);
+  let result = null;
+  function rec(i, remaining, chosen){
+    if(result) return;
+    if(remaining===0){ result = chosen.slice(); return; }
+    if(i>=n || remaining<0) return;
+    let rest = 0;
+    for(let j=i;j<n;j++) rest += vals[order[j]];
+    if(rest < remaining) return;
+    const idx = order[i];
+    chosen.push(idx);
+    rec(i+1, remaining-vals[idx], chosen);
+    chosen.pop();
+    if(result) return;
+    rec(i+1, remaining, chosen);
+  }
+  rec(0, targetCents, []);
+  return result ? result.map(i=>pool[i]) : null;
+}
+
+/* ---- Nome do pagador no extrato costuma vir com um CPF/CNPJ colado na frente ---- */
+function extractPayerName(nomeFrag){
+  const m = (nomeFrag||"").trim().match(/^\d{6,}\s+(.+)$/);
+  return (m ? m[1] : (nomeFrag||"")).trim();
+}
+// Pontua a força do casamento de nome — o BB costuma truncar nomes longos no
+// extrato, então "igual" na prática precisa tolerar prefixo (passo 1) antes de
+// cair pro sobrenome (passo 2).
+function scoreNomeMatch(extratoNomeRaw, tituloNomeRaw){
+  const a = normalizeText(extractPayerName(extratoNomeRaw));
+  const b = normalizeText(tituloNomeRaw);
+  if(!a || !b) return 0;
+  if(a === b) return 3;
+  if(b.startsWith(a) || a.startsWith(b)) return 2;
+  const aWords = a.split(/\s+/).filter(Boolean);
+  const bWords = b.split(/\s+/).filter(Boolean);
+  if(aWords.length){
+    const last = aWords[aWords.length-1];
+    if(last.length>=3 && bWords.some(w=> w===last || w.startsWith(last) || last.startsWith(w))) return 1;
+  }
+  return 0;
+}
+const METODO_LABEL = {3:"nome exato", 2:"nome (prefixo/truncado)", 1:"sobrenome"};
+
+/* ---- Motor principal: nome > sobrenome > valor > decomposição de "Cobrança" ---- */
+function matchBaixaServicos(linhasExtrato, titulosAbertosIn){
+  const titulos = titulosAbertosIn.map(t=>({...t, _used:false}));
+  const porEmissao = (a,b)=>{
+    const da = a.emissao ? partsToDate(a.emissao).getTime() : 0;
+    const db = b.emissao ? partsToDate(b.emissao).getTime() : 0;
+    if(da!==db) return da-db;
+    return String(a.documento).localeCompare(String(b.documento), undefined, {numeric:true});
+  };
+  // "Pix - Recebido" tem hífen/espaços entre as palavras no extrato — remove tudo
+  // que não é letra/número antes de comparar, senão "PIX RECEBIDO" (sem hífen)
+  // nunca bate como substring e a linha inteira passa batido sem gerar baixa.
+  const flat = s => normalizeText(s).replace(/[^A-Z0-9]/g,"");
+  const linhasCandidatas = linhasExtrato.filter(l=>{
+    if(l.tipo!=="C") return false;
+    const h = flat(l.historico);
+    return h.includes("PIXRECEBIDO") || h.includes("TRANSFERENCIARECEBIDA") || h==="COBRANCA";
+  });
+  const resultados = [];
+  const pendentesCobranca = [];
+  linhasCandidatas.forEach(l=>{
+    const isCobranca = flat(l.historico) === "COBRANCA";
+    if(!isCobranca){
+      const nomeExtrato = extractPayerName(l.nomeFrag);
+      let candidatos = titulos.filter(t=>!t._used).map(t=>({t, score:scoreNomeMatch(nomeExtrato, t.nome)})).filter(x=>x.score>0);
+      if(candidatos.length){
+        const maxScore = Math.max(...candidatos.map(c=>c.score));
+        candidatos = candidatos.filter(c=>c.score===maxScore);
+      }
+      if(candidatos.length>1){
+        const porValor = candidatos.filter(c=> Math.round(c.t.valorParcela*100)===Math.round(l.valor*100));
+        if(porValor.length===1) candidatos = porValor;
+      }
+      if(candidatos.length===1){
+        const t = candidatos[0].t; t._used = true;
+        resultados.push({linha:l, titulos:[t], metodo: METODO_LABEL[candidatos[0].score]});
+        return;
+      }
+      // passo 3: valor puro (nome não resolveu, ou ficou ambíguo)
+      const porValor = titulos.filter(t=>!t._used && Math.round(t.valorParcela*100)===Math.round(l.valor*100));
+      if(porValor.length===1){
+        porValor[0]._used = true;
+        resultados.push({linha:l, titulos:[porValor[0]], metodo:"valor"});
+        return;
+      }
+      resultados.push({linha:l, titulos:[], metodo:null});
+      return;
+    }
+    // "Cobrança": tenta valor único primeiro (raro, mas acontece com 1 parcela só)
+    const porValorUnico = titulos.filter(t=>!t._used && Math.round(t.valorParcela*100)===Math.round(l.valor*100));
+    if(porValorUnico.length===1){
+      porValorUnico[0]._used = true;
+      resultados.push({linha:l, titulos:[porValorUnico[0]], metodo:"valor"});
+      return;
+    }
+    pendentesCobranca.push(l);
+  });
+  // passo 4: decompõe "Cobrança" na ordem de emissão das notas, sobre o que sobrou
+  pendentesCobranca.forEach(l=>{
+    const pool = titulos.filter(t=>!t._used).sort(porEmissao);
+    const targetCents = Math.round(l.valor*100);
+    let acc = 0, picked = [];
+    for(const t of pool){
+      acc += Math.round(t.valorParcela*100);
+      picked.push(t);
+      if(acc === targetCents) break;
+      if(acc > targetCents){ acc = null; break; }
+    }
+    if(acc === targetCents && picked.length){
+      picked.forEach(t=>t._used=true);
+      resultados.push({linha:l, titulos:picked, metodo:`Cobrança — ${picked.length} parcela(s) na ordem de emissão`});
+      return;
+    }
+    const found = dpSubsetExact(pool.map(t=>({...t, _cents:Math.round(t.valorParcela*100)})), targetCents);
+    if(found && found.length){
+      found.forEach(fu=>{ const t = titulos.find(x=>x.documento===fu.documento && !x._used); if(t) t._used=true; });
+      resultados.push({linha:l, titulos:found, metodo:`Cobrança — ${found.length} parcela(s) por soma exata (confira a ordem)`, conferir:true});
+      return;
+    }
+    resultados.push({linha:l, titulos:[], metodo:null});
+  });
+  return {resultados, naoUsados: titulos.filter(t=>!t._used)};
+}
+
+/* ---- Resolução de CNPJ — código (empresa+cliente+código) primeiro, depois nome aproximado ---- */
+function resolverCnpj(empresaCnpj, codigo, nomeRelatorio){
+  const chave = `${empresaCnpj}_cliente_${codigo}`;
+  const doc = codigoIndex[chave];
+  if(doc && clientesDB[doc]) return {documento: doc, nome: clientesDB[doc].razao_social};
+  return findBestMatchCliente(nomeRelatorio);
+}
+let codigoIndex = {};
+function rebuildCodigoIndex(){
+  codigoIndex = {};
+  Object.keys(clientesDB).forEach(doc=>{
+    const codigos = clientesDB[doc].codigos || {};
+    Object.keys(codigos).forEach(k=>{ codigoIndex[`${k}_${codigos[k]}`] = doc; });
+  });
+}
+function findBestMatchCliente(nome){
+  const norm = normalizeText(nome);
+  const words = norm.split(/\s+/).filter(w=>w.length>2);
+  let best=null, bestScore=0, bestKey=null;
+  Object.keys(clientesDB).forEach(key=>{
+    const c = clientesDB[key];
+    const cn = normalizeText(c.razao_social);
+    let score = 0;
+    if(cn.includes(norm) || norm.includes(cn)) score += 10;
+    words.forEach(w=>{ if(cn.includes(w)) score += 1; });
+    if(score>bestScore){ bestScore=score; best=c; bestKey=key; }
+  });
+  return bestScore>0 ? {documento:bestKey, nome:best.razao_social} : null;
+}
+function loadClientes(){ const raw = localStorage.getItem("cibele_clientes_fornecedores"); return raw ? JSON.parse(raw) : {}; }
+function saveClientes(dbo){ localStorage.setItem("cibele_clientes_fornecedores", JSON.stringify(dbo)); }
+// "var" (não "let") de propósito: o módulo Firebase abaixo sincroniza fazendo
+// "window.clientesDB = ...", e um "let" nesse escopo global NUNCA vira
+// propriedade de window — o cadastro pareceria nunca atualizar (bug já visto
+// em outras ferramentas do Hub). "var" no escopo global É window.clientesDB.
+var clientesDB = loadClientes();
+rebuildCodigoIndex();
+
+/* ---- Fluxo principal ---- */
+let contasReceberState = null, extratoServicosState = null;
+wireDropzone("contasReceberDrop","contasReceberFile");
+wireDropzone("extratoServicosDrop","extratoServicosFile");
+document.getElementById("contasReceberFile").addEventListener("change", async function(){
+  const f = this.files[0]; if(!f) return;
+  const status = document.getElementById("servicosStatus");
+  status.classList.remove("hidden","err"); status.textContent = "Lendo PDF...";
+  try{
+    const parsed = await parseContasReceberPdf(f);
+    if(!parsed.empresaCnpj) throw new Error('Não achei "CNPJ:" no cabeçalho deste relatório — confere se é o PDF certo.');
+    if(!parsed.titulos.length) throw new Error("Não encontrei nenhum título neste relatório.");
+    contasReceberState = parsed;
+    markDropDone(document.getElementById("contasReceberDrop"), `${parsed.empresaNome} (${parsed.titulos.length} títulos)`);
+    status.classList.add("hidden");
+  }catch(err){
+    status.classList.remove("hidden"); status.classList.add("err"); status.textContent = "Erro: " + err.message;
+    contasReceberState = null;
+  }
+  document.getElementById("processServicosBtn").disabled = !(contasReceberState && extratoServicosState);
+});
+document.getElementById("extratoServicosFile").addEventListener("change", async function(){
+  const f = this.files[0]; if(!f) return;
+  const status = document.getElementById("servicosStatus");
+  status.classList.remove("hidden","err"); status.textContent = "Lendo PDF...";
+  try{
+    extratoServicosState = await parseExtratoContaBB(f);
+    if(!extratoServicosState.length) throw new Error("Não encontrei nenhum lançamento nesse extrato.");
+    markDropDone(document.getElementById("extratoServicosDrop"), `${f.name} (${extratoServicosState.length} lançamentos)`);
+    status.classList.add("hidden");
+  }catch(err){
+    status.classList.remove("hidden"); status.classList.add("err"); status.textContent = "Erro: " + err.message;
+    extratoServicosState = null;
+  }
+  document.getElementById("processServicosBtn").disabled = !(contasReceberState && extratoServicosState);
+});
+
+let servicosRowsState = [];
+function processarBaixaServicos(){
+  const abertos = contasReceberState.titulos.filter(t=> normalizeText(t.situacao).startsWith("ABERT"));
+  const {resultados, naoUsados} = matchBaixaServicos(extratoServicosState, abertos);
+  const rows = [];
+  resultados.forEach(r=>{
+    if(!r.titulos.length){
+      rows.push({pendenteSemTitulo:true, data:r.linha.data, valor:r.linha.valor, historico:r.linha.historico, nomeFrag:r.linha.nomeFrag, statusClass:"err", statusText:"Sem título correspondente em aberto — confira/preencha à mão"});
+      return;
+    }
+    r.titulos.forEach(t=>{
+      const cnpjInfo = resolverCnpj(contasReceberState.empresaCnpj, t.codigo, t.nome);
+      rows.push({
+        numero: t.documento, cnpj: cnpjInfo?cnpjInfo.documento:"", nome: cnpjInfo?cnpjInfo.nome:t.nome,
+        vencimento: t.vencimento, databaixa: r.linha.data, valor: t.valorParcela,
+        juros:0, multa:0, desconto:0, pis:0, cofins:0, csll:0, irrf:0,
+        statusClass: cnpjInfo ? (r.conferir?"warn":null) : "err",
+        statusText: cnpjInfo ? r.metodo : "CNPJ não encontrado no cadastro — importe o relatório de Clientes abaixo",
+      });
+    });
+  });
+  naoUsados.sort((a,b)=>partsToDate(a.vencimento)-partsToDate(b.vencimento)).forEach(t=>{
+    rows.push({numero:t.documento, cnpj:"", nome:t.nome, vencimento:t.vencimento, databaixa:null, valor:t.valorParcela, juros:0,multa:0,desconto:0,pis:0,cofins:0,csll:0,irrf:0, statusClass:"err", statusText:"Título em aberto sem correspondência no extrato"});
+  });
+  servicosRowsState = rows;
+  renderServicosResult(rows, contasReceberState.empresaNome, contasReceberState.empresaCnpj);
+}
+function renderServicosResult(rows, empresaNome, empresaCnpj){
+  const box = document.getElementById("resultServicosCard");
+  box.classList.remove("hidden");
+  const nOk = rows.filter(r=>!r.statusClass).length;
+  const nWarn = rows.filter(r=>r.statusClass==="warn").length;
+  const nErr = rows.filter(r=>r.statusClass==="err").length;
+  let html = `<div class="section-title">${empresaNome} — baixa_ser.txt</div>
+  <div class="summary-row">
+    <div class="item"><div class="k">Linhas</div><div class="v">${rows.length}</div></div>
+    <div class="item"><div class="k">OK</div><div class="v">${nOk}</div></div>
+    <div class="item"><div class="k">Conferir</div><div class="v">${nWarn}</div></div>
+    <div class="item"><div class="k">Pendente</div><div class="v">${nErr}</div></div>
+  </div>
+  <div class="help">Vermelho = falta CNPJ, título sem correspondência, ou recebimento sem título casado; amarelo = casou por soma exata mas fora da ordem estrita de emissão (confira). Campos editáveis.</div>
+  <div class="table-wrap"><table class="preview"><thead><tr>
+    <th>Nº Nota</th><th>CNPJ/CPF</th><th>Nome</th><th>Vencimento</th><th>Data Baixa</th><th>Valor Recebido</th><th>Juros</th><th>Multa</th><th>Desconto</th><th>PIS</th><th>COFINS</th><th>CSLL</th><th>IRRF</th><th>Status</th>
+  </tr></thead><tbody>`;
+  rows.forEach((r,i)=>{
+    if(r.pendenteSemTitulo){
+      html += `<tr class="err"><td colspan="13" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;">${fmtDateBR(r.data)} — ${fmtBRL(r.valor)} — ${r.historico}${r.nomeFrag?(" "+r.nomeFrag):""}</td><td>${r.statusText}</td></tr>`;
+      return;
+    }
+    const trCls = r.statusClass || "";
+    html += `<tr class="${trCls}">
+      <td class="cell"><input class="cell-input" value="${r.numero}" onchange="updateServicoRow(${i},'numero',this.value)"></td>
+      <td class="cell"><input class="cell-input wide" value="${r.cnpj}" onchange="updateServicoRow(${i},'cnpj',this.value)"></td>
+      <td>${r.nome||""}</td>
+      <td class="cell"><input class="cell-input" value="${fmtDateBR(r.vencimento)}" onchange="updateServicoRow(${i},'vencimento',this.value)"></td>
+      <td class="cell"><input class="cell-input" value="${r.databaixa?fmtDateBR(r.databaixa):''}" onchange="updateServicoRow(${i},'databaixa',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.valor)}" onchange="updateServicoRow(${i},'valor',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.juros)}" onchange="updateServicoRow(${i},'juros',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.multa)}" onchange="updateServicoRow(${i},'multa',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.desconto)}" onchange="updateServicoRow(${i},'desconto',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.pis)}" onchange="updateServicoRow(${i},'pis',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.cofins)}" onchange="updateServicoRow(${i},'cofins',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.csll)}" onchange="updateServicoRow(${i},'csll',this.value)"></td>
+      <td class="cell"><input class="cell-input num" value="${fmtBRL(r.irrf)}" onchange="updateServicoRow(${i},'irrf',this.value)"></td>
+      <td>${r.statusText||""}</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>
+  <div class="btn-row">
+    <button class="btn" onclick="downloadServicosXlsx()">Baixar baixa_servicos.xlsx</button>
+    <button class="btn ghost" onclick="downloadServicosTxt()">Baixar baixa_ser.txt</button>
+  </div>`;
+  box.innerHTML = html;
+  const semCnpj = rows.filter(r=>!r.pendenteSemTitulo && !r.cnpj);
+  document.getElementById("cnpjHelperCard").classList.toggle("hidden", semCnpj.length===0);
+  document.getElementById("cnpjHelperEmpresa").textContent = `da Cia da Língua (CNPJ ${empresaCnpj})`;
+  cnpjHelperEmpresaCnpj = empresaCnpj;
+}
+function updateServicoRow(i, field, val){
+  const r = servicosRowsState[i];
+  if(field==="vencimento" || field==="databaixa"){ const dt=brParts(val); r[field]=dt||null; }
+  else if(["valor","juros","multa","desconto","pis","cofins","csll","irrf"].includes(field)){ const n=parseBRL(val); if(n!=null) r[field]=n; }
+  else { r[field]=val; }
+  if(field==="cnpj"){
+    const cl = classifyDocumento(val);
+    r.statusClass = cl.valido ? (r.statusClass==="warn"?"warn":null) : "err";
+    r.statusText = cl.valido ? (r.statusText||"OK") : "CNPJ/CPF inválido";
+  }
+}
+function servicoRowArray(r){
+  return [r.numero, onlyDigits2(r.cnpj), fmtDateBR(r.vencimento), r.databaixa?fmtDateBR(r.databaixa):"", r.valor, r.juros, r.multa, r.desconto, r.pis, r.cofins, r.csll, r.irrf];
+}
+function downloadServicosXlsx(){
+  const header = ["Número da Nota","CPF/CNPJ do Cliente","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Recebido","Valor Juros","Valor Multa","Valor Desconto","Valor PIS","Valor COFINS","Valor CSLL","Valor IRRF"];
+  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo);
+  downloadXlsx("baixa_servicos.xlsx", [header, ...usaveis.map(servicoRowArray)], "Baixa");
+}
+function downloadServicosTxt(){
+  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo);
+  const naoValidas = usaveis.filter(r=>{ const c=classifyDocumento(r.cnpj); return !c.valido; });
+  if(naoValidas.length){
+    if(!confirm(`${naoValidas.length} linha(s) ainda têm CNPJ/CPF ausente ou inválido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
+  }
+  const lines = usaveis.map(r=> servicoRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
+  downloadTextAnsi("baixa_ser.txt", lines.join("\r\n") + "\r\n");
+}
+
+/* ---- Cadastro de Clientes (PDF) — fallback pra resolver CNPJ que faltou ---- */
+const BR_UFS = {"ACRE":"AC","ALAGOAS":"AL","AMAPA":"AP","AMAZONAS":"AM","BAHIA":"BA","CEARA":"CE","DISTRITO FEDERAL":"DF","ESPIRITO SANTO":"ES","GOIAS":"GO","MARANHAO":"MA","MATO GROSSO DO SUL":"MS","MATO GROSSO":"MT","MINAS GERAIS":"MG","PARAIBA":"PB","PARANA":"PR","PERNAMBUCO":"PE","PIAUI":"PI","RIO DE JANEIRO":"RJ","RIO GRANDE DO NORTE":"RN","RIO GRANDE DO SUL":"RS","RONDONIA":"RO","RORAIMA":"RR","SANTA CATARINA":"SC","SAO PAULO":"SP","SERGIPE":"SE","TOCANTINS":"TO","PARA":"PA"};
+const BR_UF_NAMES = Object.keys(BR_UFS).sort((a,b)=>b.length-a.length);
+function splitCidadeUfPais(tail){
+  let t = normalizeText(tail).replace(/\bBRASIL\b\s*$/,"").trim();
+  t = t.replace(/^\d{4,12}\s+/,"");
+  for(const name of BR_UF_NAMES){
+    const re = new RegExp("\\s+"+name+"$");
+    if(re.test(t)) return {municipio: t.replace(re,"").trim(), uf: BR_UFS[name]};
+  }
+  return {municipio: t.trim(), uf: ""};
+}
+function parseClientesPdf(allLines){
+  const out = [];
+  const headerRe = /^\s*(\d{1,6})\s+(.+?)\s+(CNPJ|CPF|Outros)\s+([\d.\/-]*)/;
+  const cityRe = /^(.+?)\s+([A-Z]{2})\s+(\d{5}-\d{3}|-)(?=\s|$)/;
+  for(let i=0;i<allLines.length;i++){
+    const hm = allLines[i].match(headerRe);
+    if(!hm) continue;
+    const [, codigo, nomeRaw, tipo, docRaw] = hm;
+    const doc = onlyDigits2(docRaw);
+    if(!doc) continue;
+    let municipio="", uf="";
+    for(let j=i+1;j<=i+2 && j<allLines.length;j++){
+      const cm = allLines[j].match(cityRe);
+      if(cm){ municipio=cm[1].trim(); uf=cm[2]; break; }
+    }
+    let razao = nomeRaw.replace(new RegExp("^"+codigo+"\\s*"),"").trim();
+    out.push({codigo, documento:doc, tipo: doc.length===14?"CNPJ":"CPF", razao_social: razao, municipio, uf});
+  }
+  return out;
+}
+let cnpjHelperEmpresaCnpj = null;
+wireDropzone("cadPdfDrop","cadPdfFile");
+document.getElementById("cadPdfFile").addEventListener("change", async function(){
+  const f = this.files[0]; if(!f) return;
+  const status = document.getElementById("cadPdfStatus");
+  status.classList.remove("hidden","err","ok"); status.textContent = "Lendo PDF...";
+  try{
+    const pages = await extractPdfAllLines(f);
+    const allLines = pages.flat();
+    const parsed = parseClientesPdf(allLines);
+    if(!parsed.length) throw new Error("Não consegui reconhecer nenhum registro nesse PDF.");
+    let addedCli=0, updatedCod=0;
+    const dirty = {};
+    parsed.forEach(p=>{
+      if(!p.documento) return;
+      if(!clientesDB[p.documento]){
+        clientesDB[p.documento] = {documento:p.documento, tipo:p.tipo, razao_social:p.razao_social, municipio:p.municipio, uf:p.uf, codigos:{}, fonte:"importado-pdf-cia-da-lingua"};
+        addedCli++;
+      }
+      if(!clientesDB[p.documento].codigos) clientesDB[p.documento].codigos = {};
+      if(p.codigo && cnpjHelperEmpresaCnpj){
+        const chave = `${cnpjHelperEmpresaCnpj}_cliente`;
+        if(clientesDB[p.documento].codigos[chave] !== p.codigo){
+          clientesDB[p.documento].codigos[chave] = p.codigo;
+          updatedCod++;
+        }
+      }
+      dirty[p.documento] = clientesDB[p.documento];
+    });
+    saveClientes(clientesDB);
+    rebuildCodigoIndex();
+    if(window.cdlCloud) window.cdlCloud.pushManyClientes(dirty);
+    status.classList.add("ok");
+    status.textContent = `Cadastro atualizado: ${addedCli} cliente(s) novo(s), ${updatedCod} código(s) vinculado(s). Reprocessando...`;
+    if(servicosRowsState.length) processarBaixaServicos();
+  }catch(err){
+    status.classList.add("err"); status.textContent = "Erro: " + err.message;
+  }
+});
+</script>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getFirestore, collection, doc, onSnapshot, writeBatch } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+// Mesmo projeto Firebase e mesma collection "clientes" que a Conversões Cibele,
+// Baixas de Parcelas e Lançamentos Bari já usam — banco de CNPJ único
+// compartilhado entre as ferramentas do escritório.
+const firebaseConfig = {
+  apiKey: "AIzaSyCBIQkYYNt3K4gZ0OGqoqsU8Jnrsgxif5k",
+  authDomain: "conversoes-cibele.firebaseapp.com",
+  projectId: "conversoes-cibele",
+  storageBucket: "conversoes-cibele.firebasestorage.app",
+  messagingSenderId: "401784315449",
+  appId: "1:401784315449:web:5d459a524059c0978bb7e8"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+let ready = false, firstSnap = true;
+
+function setCloudBadge(text, cls){
+  const el = document.getElementById("cloudStatus");
+  if(!el) return;
+  el.textContent = text; el.className = "badge " + (cls||"info");
+}
+setCloudBadge("Conectando à nuvem…", "warn");
+signInAnonymously(auth).catch(err=>{
+  console.error("Firebase auth error", err);
+  setCloudBadge("Nuvem indisponível — usando só este navegador", "err");
+});
+
+onAuthStateChanged(auth, (user)=>{
+  if(!user) return;
+  ready = true;
+  onSnapshot(collection(db, "clientes"), (snap)=>{
+    const cloudData = {};
+    snap.forEach(d=> cloudData[d.id] = d.data());
+    if(firstSnap){
+      firstSnap = false;
+      const localOnly = {};
+      Object.keys(window.clientesDB||{}).forEach(k=>{ if(!cloudData[k]) localOnly[k]=window.clientesDB[k]; });
+      window.clientesDB = {...cloudData, ...localOnly};
+      saveClientes(window.clientesDB);
+      if(Object.keys(localOnly).length) window.cdlCloud.pushManyClientes(localOnly);
+    } else {
+      window.clientesDB = cloudData;
+      saveClientes(window.clientesDB);
+    }
+    if(window.rebuildCodigoIndex) window.rebuildCodigoIndex();
+    setCloudBadge("Sincronizado com a nuvem", "ok");
+  }, err=>{ console.error("clientes onSnapshot", err); setCloudBadge("Erro de sincronização", "err"); });
+});
+
+window.cdlCloud = {
+  pushManyClientes(obj){
+    if(!ready) return;
+    const keys = Object.keys(obj||{}); if(!keys.length) return;
+    const batch = writeBatch(db);
+    keys.forEach(k=> batch.set(doc(db,"clientes",k), obj[k]));
+    batch.commit().catch(e=>console.error("pushManyClientes",e));
+  }
+};
 </script>
 </body>
 </html>
