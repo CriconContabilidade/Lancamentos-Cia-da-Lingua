@@ -260,6 +260,7 @@ function brParts(str){
   return {y:parseInt(yy), m:parseInt(mm), d:parseInt(dd)};
 }
 function partsToDate(dt){ return new Date(Date.UTC(dt.y, dt.m-1, dt.d)); }
+function diffDays(a,b){ return Math.round((partsToDate(a)-partsToDate(b))/86400000); }
 function downloadText(filename, content, mime){
   const blob = new Blob([content], {type: mime||"text/plain;charset=utf-8"});
   const a = document.createElement("a");
@@ -975,26 +976,41 @@ function matchBaixaServicos(linhasExtrato, titulosAbertosIn){
     }
     pendentesCobranca.push(l);
   });
-  // passo 4: decompõe "Cobrança" na ordem de emissão das notas, sobre o que sobrou
+  // passo 4: decompõe "Cobrança" sobre o que sobrou. Restringe por PROXIMIDADE DE
+  // VENCIMENTO (janelas progressivas, igual à Baixas-Parcelas) antes de somar —
+  // sem isso, uma soma exata pode casar por pura coincidência aritmética com
+  // parcelas de vencimentos espalhados por semanas, o que já geraria baixa
+  // errada (confirmado testando contra um extrato real: sem essa restrição,
+  // uma "Cobrança" casou com parcelas vencendo 17 dias entre si). A ordem de
+  // emissão das notas entra como critério de escolha DENTRO da janela válida,
+  // não como substituto da restrição de vencimento.
+  const WINDOWS_COBRANCA = [[0,3],[-2,6],[-5,10],[-10,20]];
   pendentesCobranca.forEach(l=>{
-    const pool = titulos.filter(t=>!t._used).sort(porEmissao);
     const targetCents = Math.round(l.valor*100);
-    let acc = 0, picked = [];
-    for(const t of pool){
-      acc += Math.round(t.valorParcela*100);
-      picked.push(t);
-      if(acc === targetCents) break;
-      if(acc > targetCents){ acc = null; break; }
+    let achou = null, wide = false;
+    for(let w=0; w<WINDOWS_COBRANCA.length && !achou; w++){
+      const [wlo, whi] = WINDOWS_COBRANCA[w];
+      const pool = titulos.filter(t=>!t._used && t.vencimento && diffDays(l.data, t.vencimento)>=wlo && diffDays(l.data, t.vencimento)<=whi).sort(porEmissao);
+      if(!pool.length) continue;
+      // tenta primeiro um prefixo contíguo na ordem de emissão dentro da janela
+      let acc = 0, picked = [];
+      for(const t of pool){
+        acc += Math.round(t.valorParcela*100);
+        picked.push(t);
+        if(acc === targetCents) break;
+        if(acc > targetCents){ acc = null; break; }
+      }
+      if(acc === targetCents && picked.length){ achou = picked; wide = w>0; break; }
+      const found = dpSubsetExact(pool.map(t=>({...t, _cents:Math.round(t.valorParcela*100)})), targetCents);
+      if(found && found.length){
+        achou = found.map(fu=> pool.find(x=>x.documento===fu.documento));
+        wide = true;
+        break;
+      }
     }
-    if(acc === targetCents && picked.length){
-      picked.forEach(t=>t._used=true);
-      resultados.push({linha:l, titulos:picked, metodo:`Cobrança — ${picked.length} parcela(s) na ordem de emissão`});
-      return;
-    }
-    const found = dpSubsetExact(pool.map(t=>({...t, _cents:Math.round(t.valorParcela*100)})), targetCents);
-    if(found && found.length){
-      found.forEach(fu=>{ const t = titulos.find(x=>x.documento===fu.documento && !x._used); if(t) t._used=true; });
-      resultados.push({linha:l, titulos:found, metodo:`Cobrança — ${found.length} parcela(s) por soma exata (confira a ordem)`, conferir:true});
+    if(achou){
+      achou.forEach(t=>t._used=true);
+      resultados.push({linha:l, titulos:achou, metodo:`Cobrança — ${achou.length} parcela(s) por vencimento próximo${wide?" (confira)":" (ordem de emissão)"}`, conferir:wide});
       return;
     }
     resultados.push({linha:l, titulos:[], metodo:null});
