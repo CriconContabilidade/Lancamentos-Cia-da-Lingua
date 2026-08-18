@@ -492,6 +492,7 @@ const PADROES_BANCO_SEED = [
   {keywords:["LISIANE ROSSI"], contaDirecional:493, histSaida:"PAGAMENTO REF. EMPRESTIMO A SOCIA LISIANE ROSSI", histEntrada:"VALOR REF. EMPRESTIMO A SOCIA LISIANE ROSSI"},
   {keywords:["DEBITO SERVICO COBRANCA"], debito:384, credito:null, hist:"PAGAMENTO REF. TARIFA DE COBRANCA BANCO DO BRASIL"},
   {keywords:["TARIFA PIX ENVIADO"], debito:384, credito:null, hist:"PAGAMENTO REF. TARIFA DE ENVIO PIX BANCO DO BRASIL"},
+  {keywords:["TARIFA PACOTE DE SERVICOS"], debito:384, credito:null, hist:"PAGAMENTO REF. TARIFA DO PACOTE DE SERVICOS BANCARIOS"},
 ];
 function loadIgnorar(){
   const raw = localStorage.getItem("cdl_ignorar_banco");
@@ -507,7 +508,12 @@ function saveIgnorar(list){ localStorage.setItem("cdl_ignorar_banco", JSON.strin
 let ignorarDB = loadIgnorar();
 function loadPadroesBanco(){
   const raw = localStorage.getItem("cdl_padroes_banco");
-  return raw ? JSON.parse(raw) : PADROES_BANCO_SEED.slice();
+  const salvo = raw ? JSON.parse(raw) : [];
+  const chaves = new Set(salvo.map(p=>(p.keywords||[]).join("|")));
+  const novos = PADROES_BANCO_SEED.filter(p=>!chaves.has((p.keywords||[]).join("|"))).map(p=>({...p}));
+  const combinado = [...salvo, ...novos];
+  if(novos.length) savePadroesBanco(combinado);
+  return combinado;
 }
 function savePadroesBanco(list){ localStorage.setItem("cdl_padroes_banco", JSON.stringify(list)); }
 let padroesBancoDB = loadPadroesBanco();
@@ -569,6 +575,25 @@ async function parseContasPagas(file){
   }
   return groups;
 }
+// Contas fixas de juros/multa sobre atraso de qualquer despesa (Juros Passivos /
+// Multas Passivas do plano de contas) — não são específicas de uma categoria.
+const JUROS_CONTA = 382, MULTA_CONTA = 383;
+function classificarLinhaExcel(descricao){
+  const d = normalizeText(descricao);
+  if(d.includes("JUROS")) return "juros";
+  if(d.includes("MULTA")) return "multa";
+  if(d.includes("PGTO") || d.includes("PAGTO") || d.includes("PAGAMENTO")) return "pgto";
+  return "base";
+}
+// A linha "PGTO" costuma só confirmar a data (e às vezes vem com o valor total
+// digitado errado, como aconteceu com um Condomínio real: 425,59 em vez de
+// 525,59) — quando BOLETO/JUROS/MULTA já somam alguma coisa, usa esse
+// detalhamento como fonte de verdade e ignora o valor da linha PGTO. Só cai pro
+// valor da PGTO quando não há detalhamento nenhum (ex. Claro/Celesc/Cricon/
+// Unimed, que vêm numa linha só).
+function derivarHistJurosMulta(histTemplate, rotulo){
+  return histTemplate.replace(/^(PAGAMENTO REF\.|VALOR REF\.)/i, `$1 ${rotulo} REF.`);
+}
 function buildExcelEntries(groups){
   const rows = [];
   groups.forEach(g=>{
@@ -577,24 +602,40 @@ function buildExcelEntries(groups){
       const soma = g.rows.reduce((s,r)=> s + (r.valor||0), 0);
       const dataRow = g.rows.find(r=>r.data)?.data || null;
       if(soma>0){
-        rows.push({data:dataRow, debito:null, credito:null, valor:soma, hist:null, complemento:`${g.fornecedor} — categoria não cadastrada`, iniciaLote:1, flag:true, statusText:"Fornecedor sem categoria cadastrada — cadastre acima ou complete à mão", origem:"excel"});
+        rows.push({data:dataRow, debito:null, credito:BANK_CONTA, valor:soma, hist:null, complemento:`${g.fornecedor} — categoria não cadastrada`, iniciaLote:1, flag:true, statusText:"Fornecedor sem categoria cadastrada — cadastre acima ou complete à mão", origem:"excel"});
       }
       return;
     }
     if(cat.ignorar) return;
-    const soma = Math.round(g.rows.reduce((s,r)=> s + (r.valor||0), 0)*100)/100;
-    if(soma<=0) return;
-    const dataRow = g.rows.find(r=>r.data)?.data || null;
+    const classificadas = g.rows.map(r=>({...r, tipo: classificarLinhaExcel(r.descricao)}));
+    const somaTipo = tipo => classificadas.filter(r=>r.tipo===tipo).reduce((s,r)=>s+(r.valor||0),0);
+    const valorJuros = Math.round(somaTipo("juros")*100)/100;
+    const valorMulta = Math.round(somaTipo("multa")*100)/100;
+    let valorBase = Math.round(somaTipo("base")*100)/100;
+    if(valorBase + valorJuros + valorMulta === 0){
+      valorBase = Math.round(somaTipo("pgto")*100)/100;
+    }
+    const dataRow = classificadas.find(r=>r.tipo==="pgto" && r.data)?.data || classificadas.find(r=>r.data)?.data || null;
+    const totalGrupo = Math.round((valorBase+valorJuros+valorMulta)*100)/100;
+    if(totalGrupo<=0) return;
     if(!dataRow){
-      rows.push({data:null, debito:cat.conta, credito:null, valor:soma, hist:null, complemento:`${g.fornecedor} — sem data de pagamento identificada`, iniciaLote:1, flag:true, statusText:"Sem data de pagamento — complete à mão", origem:"excel"});
+      rows.push({data:null, debito:cat.conta, credito:BANK_CONTA, valor:totalGrupo, hist:null, complemento:`${g.fornecedor} — sem data de pagamento identificada`, iniciaLote:1, flag:true, statusText:"Sem data de pagamento — complete à mão", origem:"excel"});
       return;
     }
-    const hist = aplicarHist(cat.hist, mesAnoRef(dataRow, cat.periodo));
-    rows.push({data:dataRow, debito:cat.conta, credito:null, valor:soma, hist, complemento:null, iniciaLote:1, flag:false, statusText:"OK ("+g.fornecedor+")", origem:"excel"});
+    const histBase = aplicarHist(cat.hist, mesAnoRef(dataRow, cat.periodo));
+    if(valorBase>0){
+      rows.push({data:dataRow, debito:cat.conta, credito:BANK_CONTA, valor:valorBase, hist:histBase, complemento:null, iniciaLote:1, flag:false, statusText:"OK ("+g.fornecedor+")", origem:"excel"});
+    }
+    if(valorJuros>0){
+      rows.push({data:dataRow, debito:JUROS_CONTA, credito:BANK_CONTA, valor:valorJuros, hist:derivarHistJurosMulta(histBase,"JUROS PASSIVOS"), complemento:null, iniciaLote:1, flag:false, statusText:"OK (juros — "+g.fornecedor+")", origem:"excel"});
+    }
+    if(valorMulta>0){
+      rows.push({data:dataRow, debito:MULTA_CONTA, credito:BANK_CONTA, valor:valorMulta, hist:derivarHistJurosMulta(histBase,"MULTA"), complemento:null, iniciaLote:1, flag:false, statusText:"OK (multa — "+g.fornecedor+")", origem:"excel"});
+    }
     if(cat.companion){
       const compData = cat.companion.dataUltimoDiaMesPagamento ? {y:dataRow.y, m:dataRow.m, d: ultimoDiaMes(dataRow.y, dataRow.m)} : dataRow;
       const compHist = aplicarHist(cat.companion.hist, mesAnoRef(compData, "atual"));
-      rows.push({data:compData, debito:cat.companion.conta, credito:cat.companion.contraConta, valor:soma, hist:compHist, complemento:null, iniciaLote:1, flag:false, statusText:"OK (lançamento automático — honorários a pagar)", origem:"excel"});
+      rows.push({data:compData, debito:cat.companion.conta, credito:cat.companion.contraConta, valor:totalGrupo, hist:compHist, complemento:null, iniciaLote:1, flag:false, statusText:"OK (lançamento automático — honorários a pagar)", origem:"excel"});
     }
   });
   return rows;
@@ -628,7 +669,7 @@ async function parseAplicacaoPdf(file){
 function buildAplicacaoEntries(entries){
   return entries.map(e=>({
     data:e.data, debito:508, credito:395, valor:e.valor,
-    hist:"VALOR REF. RENDIMENTO S/ APLICACAO FINANCEIRA CDB", complemento:null,
+    hist:`VALOR REF. RENDIMENTO DE APLICACAO FINANCEIRA DO MES ${mesAnoRef(e.data,"atual")}`, complemento:null,
     iniciaLote:1, flag:false, statusText:"OK (rendimento aplicação)", origem:"aplicação",
   }));
 }
