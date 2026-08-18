@@ -350,7 +350,12 @@ function sortTh(stateVarName, state, col, label, rerenderFnName){
   return `<th class="sortable" onclick="toggleSort(${stateVarName},'${col}',${rerenderFnName})">${label} ${arrow}</th>`;
 }
 
-function wireDropzone(dropId, inputId){
+// "onFile" é opcional: quando informado, roda tanto no clique (input "change")
+// quanto no arrastar-e-soltar. Sem isso, setar input.files no "drop" NÃO dispara
+// "change" sozinho (isso só acontece com interação real de escolher arquivo) —
+// uma tela que só escuta "change" pra processar o arquivo nunca reage a um
+// arquivo largado por drag-and-drop, mesmo mostrando o nome como "carregado".
+function wireDropzone(dropId, inputId, onFile){
   const drop = document.getElementById(dropId);
   const input = document.getElementById(inputId);
   drop.addEventListener("click", ()=>input.click());
@@ -358,9 +363,17 @@ function wireDropzone(dropId, inputId){
   drop.addEventListener("dragleave", ()=> drop.classList.remove("drag"));
   drop.addEventListener("drop", e=>{
     e.preventDefault(); drop.classList.remove("drag");
-    if(e.dataTransfer.files[0]){ input.files = e.dataTransfer.files; markDropDone(drop, e.dataTransfer.files[0].name); }
+    const f = e.dataTransfer.files[0];
+    if(f){
+      input.files = e.dataTransfer.files;
+      markDropDone(drop, f.name);
+      if(onFile) onFile(f, drop);
+    }
   });
-  input.addEventListener("change", ()=>{ if(input.files[0]) markDropDone(drop, input.files[0].name); });
+  input.addEventListener("change", ()=>{
+    const f = input.files[0];
+    if(f){ markDropDone(drop, f.name); if(onFile) onFile(f, drop); }
+  });
 }
 function markDropDone(drop, label){
   drop.classList.add("done");
@@ -1058,10 +1071,7 @@ rebuildCodigoIndex();
 
 /* ---- Fluxo principal ---- */
 let contasReceberState = null, extratoServicosState = null;
-wireDropzone("contasReceberDrop","contasReceberFile");
-wireDropzone("extratoServicosDrop","extratoServicosFile");
-document.getElementById("contasReceberFile").addEventListener("change", async function(){
-  const f = this.files[0]; if(!f) return;
+wireDropzone("contasReceberDrop","contasReceberFile", async (f, drop)=>{
   const status = document.getElementById("servicosStatus");
   status.classList.remove("hidden","err"); status.textContent = "Lendo PDF...";
   try{
@@ -1069,7 +1079,7 @@ document.getElementById("contasReceberFile").addEventListener("change", async fu
     if(!parsed.empresaCnpj) throw new Error('Não achei "CNPJ:" no cabeçalho deste relatório — confere se é o PDF certo.');
     if(!parsed.titulos.length) throw new Error("Não encontrei nenhum título neste relatório.");
     contasReceberState = parsed;
-    markDropDone(document.getElementById("contasReceberDrop"), `${parsed.empresaNome} (${parsed.titulos.length} títulos)`);
+    markDropDone(drop, `${parsed.empresaNome} (${parsed.titulos.length} títulos)`);
     status.classList.add("hidden");
   }catch(err){
     status.classList.remove("hidden"); status.classList.add("err"); status.textContent = "Erro: " + err.message;
@@ -1077,14 +1087,13 @@ document.getElementById("contasReceberFile").addEventListener("change", async fu
   }
   document.getElementById("processServicosBtn").disabled = !(contasReceberState && extratoServicosState);
 });
-document.getElementById("extratoServicosFile").addEventListener("change", async function(){
-  const f = this.files[0]; if(!f) return;
+wireDropzone("extratoServicosDrop","extratoServicosFile", async (f, drop)=>{
   const status = document.getElementById("servicosStatus");
   status.classList.remove("hidden","err"); status.textContent = "Lendo PDF...";
   try{
     extratoServicosState = await parseExtratoContaBB(f);
     if(!extratoServicosState.length) throw new Error("Não encontrei nenhum lançamento nesse extrato.");
-    markDropDone(document.getElementById("extratoServicosDrop"), `${f.name} (${extratoServicosState.length} lançamentos)`);
+    markDropDone(drop, `${f.name} (${extratoServicosState.length} lançamentos)`);
     status.classList.add("hidden");
   }catch(err){
     status.classList.remove("hidden"); status.classList.add("err"); status.textContent = "Erro: " + err.message;
@@ -1233,9 +1242,7 @@ function parseClientesPdf(allLines){
   return out;
 }
 let cnpjHelperEmpresaCnpj = null;
-wireDropzone("cadPdfDrop","cadPdfFile");
-document.getElementById("cadPdfFile").addEventListener("change", async function(){
-  const f = this.files[0]; if(!f) return;
+wireDropzone("cadPdfDrop","cadPdfFile", async (f)=>{
   const status = document.getElementById("cadPdfStatus");
   status.classList.remove("hidden","err","ok"); status.textContent = "Lendo PDF...";
   try{
