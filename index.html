@@ -131,15 +131,11 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
   <!-- ===================== UPLOAD ===================== -->
   <div class="card">
     <div class="section-title">Arquivos do mês</div>
-    <div class="help">Carregue os três arquivos do mês (podem ser só um ou dois, se for o caso) e clique em <b>Processar</b>. FGTS, INSS, IRRF e Simples Nacional são ignorados automaticamente — já são lançados por outra rotina.</div>
+    <div class="help">Carregue os dois arquivos do mês (pode ser só um, se for o caso) e clique em <b>Processar</b>. FGTS, INSS, IRRF e Simples Nacional são ignorados automaticamente — já são lançados por outra rotina. O rendimento da aplicação (D508/C395) é lido direto da linha "Aplicação BB CDB DI" do próprio extrato da conta corrente — não precisa do extrato separado da aplicação.</div>
     <div class="field-row">
       <div class="field">
         <label>Contas Pagas (Excel)</label>
         <div class="dropzone small-drop" id="contasDrop"><div class="big">Arraste o .xlsx aqui</div><div class="small">Colunas: Fornecedor / Descrição / Valor / Data do Pagamento</div><input type="file" id="contasFile" accept=".xlsx,.xls"></div>
-      </div>
-      <div class="field">
-        <label>Extrato Aplicação BB CDB DI (PDF)</label>
-        <div class="dropzone small-drop" id="aplicacaoDrop"><div class="big">Arraste o PDF aqui</div><div class="small">Só as linhas "Rendimento mensal" são usadas</div><input type="file" id="aplicacaoFile" accept="application/pdf"></div>
       </div>
       <div class="field">
         <label>Extrato Conta Corrente BB (PDF)</label>
@@ -389,7 +385,6 @@ function markDropDone(drop, label){
   drop.querySelector(".big").textContent = "✓ " + label;
 }
 wireDropzone("contasDrop","contasFile");
-wireDropzone("aplicacaoDrop","aplicacaoFile");
 wireDropzone("extratoDrop","extratoFile");
 
 /* ---- PDF: extração de linhas de texto (agrupadas por Y, ordenadas por X) ---- */
@@ -622,16 +617,19 @@ function buildExcelEntries(groups){
       rows.push({data:null, debito:cat.conta, credito:BANK_CONTA, valor:totalGrupo, hist:null, complemento:`${g.fornecedor} — sem data de pagamento identificada`, iniciaLote:1, flag:true, statusText:"Sem data de pagamento — complete à mão", origem:"excel"});
       return;
     }
+    // Um único lançamento em partidas múltiplas (mesmo lote): base + juros + multa
+    // debitados, um só crédito no banco pelo total — não três lançamentos
+    // separados batendo na conta banco cada um por si (confirmado pelo usuário
+    // com um Condomínio real: C-13 525,59 = D-351 512,49 + D-382 juros 13,10).
     const histBase = aplicarHist(cat.hist, mesAnoRef(dataRow, cat.periodo));
-    if(valorBase>0){
-      rows.push({data:dataRow, debito:cat.conta, credito:BANK_CONTA, valor:valorBase, hist:histBase, complemento:null, iniciaLote:1, flag:false, statusText:"OK ("+g.fornecedor+")", origem:"excel"});
-    }
-    if(valorJuros>0){
-      rows.push({data:dataRow, debito:JUROS_CONTA, credito:BANK_CONTA, valor:valorJuros, hist:derivarHistJurosMulta(histBase,"JUROS PASSIVOS"), complemento:null, iniciaLote:1, flag:false, statusText:"OK (juros — "+g.fornecedor+")", origem:"excel"});
-    }
-    if(valorMulta>0){
-      rows.push({data:dataRow, debito:MULTA_CONTA, credito:BANK_CONTA, valor:valorMulta, hist:derivarHistJurosMulta(histBase,"MULTA"), complemento:null, iniciaLote:1, flag:false, statusText:"OK (multa — "+g.fornecedor+")", origem:"excel"});
-    }
+    const legs = [];
+    if(valorBase>0) legs.push({debito:cat.conta, credito:null, valor:valorBase, hist:histBase, statusText:"OK ("+g.fornecedor+")"});
+    if(valorJuros>0) legs.push({debito:JUROS_CONTA, credito:null, valor:valorJuros, hist:derivarHistJurosMulta(histBase,"JUROS PASSIVOS"), statusText:"OK (juros — "+g.fornecedor+")"});
+    if(valorMulta>0) legs.push({debito:MULTA_CONTA, credito:null, valor:valorMulta, hist:derivarHistJurosMulta(histBase,"MULTA"), statusText:"OK (multa — "+g.fornecedor+")"});
+    legs.push({debito:null, credito:BANK_CONTA, valor:totalGrupo, hist:histBase, statusText: legs.length>1 ? "OK (lote — "+g.fornecedor+")" : "OK ("+g.fornecedor+")"});
+    legs.forEach((leg,i)=>{
+      rows.push({data:dataRow, debito:leg.debito, credito:leg.credito, valor:leg.valor, hist:leg.hist, complemento:null, iniciaLote: i===0?1:null, flag:false, statusText:leg.statusText, origem:"excel"});
+    });
     if(cat.companion){
       const compData = cat.companion.dataUltimoDiaMesPagamento ? {y:dataRow.y, m:dataRow.m, d: ultimoDiaMes(dataRow.y, dataRow.m)} : dataRow;
       const compHist = aplicarHist(cat.companion.hist, mesAnoRef(compData, "atual"));
@@ -642,40 +640,7 @@ function buildExcelEntries(groups){
 }
 
 /* =========================================================================
-   PARSER 2 — EXTRATO APLICAÇÃO (BB CDB DI): soma "Rendimento mensal" por data
-   ========================================================================= */
-async function parseAplicacaoPdf(file){
-  const pages = await extractPdfAllLines(file);
-  const allLines = pages.flat();
-  const fullText = allLines.join("\n");
-  const pm = fullText.match(/Per.odo\s+\d{2}\/\d{2}\/(\d{4})\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
-  const anoRef = pm ? parseInt(pm[4]) : new Date().getFullYear();
-  const porData = {};
-  for(let i=0;i<allLines.length;i++){
-    const m = allLines[i].match(/^(\d{2})\/(\d{2})\s+Rendimento\s+mensal\b/i);
-    if(!m) continue;
-    const nextLine = allLines[i+1] || "";
-    const vm = nextLine.match(/valor\s+juros\s+([\d.,]+)/i);
-    if(!vm) continue;
-    const valor = parseBRL(vm[1]);
-    const key = `${m[1]}/${m[2]}`;
-    porData[key] = (porData[key]||0) + (valor||0);
-  }
-  return Object.keys(porData).map(k=>{
-    const [dd,mm] = k.split("/");
-    return {data:{y:anoRef, m:parseInt(mm), d:parseInt(dd)}, valor: Math.round(porData[k]*100)/100};
-  });
-}
-function buildAplicacaoEntries(entries){
-  return entries.map(e=>({
-    data:e.data, debito:508, credito:395, valor:e.valor,
-    hist:`VALOR REF. RENDIMENTO DE APLICACAO FINANCEIRA DO MES ${mesAnoRef(e.data,"atual")}`, complemento:null,
-    iniciaLote:1, flag:false, statusText:"OK (rendimento aplicação)", origem:"aplicação",
-  }));
-}
-
-/* =========================================================================
-   PARSER 3 — EXTRATO CONTA CORRENTE (Banco do Brasil)
+   PARSER 2 — EXTRATO CONTA CORRENTE (Banco do Brasil)
    Formato: "DD/MM/AAAA <cod> <cod> <cod> Histórico [Documento] Valor R$ [C|D] [Saldo C|D]"
    seguido, às vezes, de uma linha com o favorecido/complemento.
    ========================================================================= */
@@ -717,6 +682,18 @@ function buildBancoEntries(linhas, bankConta){
   linhas.forEach(l=>{
     const norm = normalizeText(l.historico + " " + l.nomeFrag);
     if(ignorarDB.some(kw=> kw && norm.includes(normalizeText(kw)))){ ignoradas++; return; }
+
+    // Aplicação BB CDB DI: o valor que sai da conta corrente pra essa linha é
+    // lançado direto como rendimento (D508/C395) — não usa um extrato separado
+    // da aplicação. Histórico cita o mês do próprio lançamento (não o anterior).
+    if(norm.includes("APLICACAO BB CDB DI")){
+      rows.push({
+        data:l.data, debito:508, credito:395, valor:l.valor,
+        hist:`VALOR REF. RENDIMENTO DE APLICACAO FINANCEIRA DO MES ${mesAnoRef(l.data,"atual")}`,
+        complemento:null, iniciaLote:1, flag:false, statusText:"OK (aplicação BB CDB DI)", origem:"banco",
+      });
+      return;
+    }
 
     const direcional = padroesBancoDB.find(p=>p.contaDirecional!=null && (p.keywords||[]).some(k=>norm.includes(normalizeText(k))));
     if(direcional){
@@ -762,9 +739,8 @@ function setUploadStatus(msg, cls){
 }
 async function processarTudo(){
   const contasFile = document.getElementById("contasFile").files[0];
-  const aplicacaoFile = document.getElementById("aplicacaoFile").files[0];
   const extratoFile = document.getElementById("extratoFile").files[0];
-  if(!contasFile && !aplicacaoFile && !extratoFile){
+  if(!contasFile && !extratoFile){
     setUploadStatus("Carregue ao menos um arquivo antes de processar.", "err");
     return;
   }
@@ -775,11 +751,6 @@ async function processarTudo(){
     if(contasFile){
       const groups = await parseContasPagas(contasFile);
       rows = rows.concat(buildExcelEntries(groups));
-    }
-    if(aplicacaoFile){
-      const entries = await parseAplicacaoPdf(aplicacaoFile);
-      if(!entries.length) setUploadStatus('Aviso: não encontrei nenhuma linha "Rendimento mensal" no extrato da aplicação.', "err");
-      rows = rows.concat(buildAplicacaoEntries(entries));
     }
     if(extratoFile){
       const linhas = await parseExtratoContaBB(extratoFile);
@@ -1008,22 +979,33 @@ function matchBaixaServicos(linhasExtrato, titulosAbertosIn){
     const isCobranca = flatText(l.historico) === "COBRANCA";
     if(!isCobranca){
       const nomeExtrato = extractPayerName(l.nomeFrag);
+      const targetCents = Math.round(l.valor*100);
       let candidatos = titulos.filter(t=>!t._used).map(t=>({t, score:scoreNomeMatch(nomeExtrato, t.nome)})).filter(x=>x.score>0);
       if(candidatos.length){
         const maxScore = Math.max(...candidatos.map(c=>c.score));
-        candidatos = candidatos.filter(c=>c.score===maxScore);
+        const poolNome = candidatos.filter(c=>c.score===maxScore).map(c=>c.t);
+        if(poolNome.length===1 && Math.round(poolNome[0].valorParcela*100)===targetCents){
+          poolNome[0]._used = true;
+          resultados.push({linha:l, titulos:poolNome, metodo:METODO_LABEL[maxScore]});
+          return;
+        }
+        // O cliente pode ter mais de uma nota em aberto pagas juntas num só Pix/
+        // transferência (não só nas linhas "Cobrança") — tenta achar uma
+        // combinação exata entre TODOS os títulos com esse mesmo nome, ancorado
+        // pela identidade do pagador, antes de desistir do casamento por nome.
+        const todosDoNome = titulos.filter(t=>!t._used && scoreNomeMatch(nomeExtrato, t.nome)===maxScore);
+        if(todosDoNome.length>1){
+          const foundNome = dpSubsetExact(todosDoNome.map(t=>({...t,_cents:Math.round(t.valorParcela*100)})), targetCents);
+          if(foundNome && foundNome.length){
+            const matched = foundNome.map(fu=> todosDoNome.find(x=>x.documento===fu.documento));
+            matched.forEach(t=>t._used=true);
+            resultados.push({linha:l, titulos:matched, metodo:`${METODO_LABEL[maxScore]} — ${matched.length} nota(s)`});
+            return;
+          }
+        }
       }
-      if(candidatos.length>1){
-        const porValor = candidatos.filter(c=> Math.round(c.t.valorParcela*100)===Math.round(l.valor*100));
-        if(porValor.length===1) candidatos = porValor;
-      }
-      if(candidatos.length===1){
-        const t = candidatos[0].t; t._used = true;
-        resultados.push({linha:l, titulos:[t], metodo: METODO_LABEL[candidatos[0].score]});
-        return;
-      }
-      // passo 3: valor puro (nome não resolveu, ou ficou ambíguo)
-      const porValor = titulos.filter(t=>!t._used && Math.round(t.valorParcela*100)===Math.round(l.valor*100));
+      // passo 3: valor puro (nome não resolveu, ou não fechou o valor)
+      const porValor = titulos.filter(t=>!t._used && Math.round(t.valorParcela*100)===targetCents);
       if(porValor.length===1){
         porValor[0]._used = true;
         resultados.push({linha:l, titulos:[porValor[0]], metodo:"valor"});
@@ -1175,8 +1157,13 @@ function processarBaixaServicos(){
       });
     });
   });
+  // Título aberto sem recebimento correspondente no mês: mostra na tela pra
+  // conferência, mas NUNCA entra no arquivo exportado — uma baixa sem data de
+  // baixa não é uma baixa de verdade, e incluir a linha assim quebra a
+  // importação no Domínio (confirmado com um arquivo de baixa real que tinha
+  // linhas desse jeito, sem a segunda data).
   naoUsados.sort((a,b)=>partsToDate(a.vencimento)-partsToDate(b.vencimento)).forEach(t=>{
-    rows.push({numero:t.documento, cnpj:"", nome:t.nome, vencimento:t.vencimento, databaixa:null, valor:t.valorParcela, juros:0,multa:0,desconto:0,pis:0,cofins:0,csll:0,irrf:0, statusClass:"err", statusText:"Título em aberto sem correspondência no extrato"});
+    rows.push({numero:t.documento, cnpj:"", nome:t.nome, vencimento:t.vencimento, databaixa:null, valor:t.valorParcela, juros:0,multa:0,desconto:0,pis:0,cofins:0,csll:0,irrf:0, statusClass:"err", statusText:"Título em aberto sem correspondência no extrato", naoExportar:true});
   });
   servicosRowsState = rows;
   renderServicosResult(rows, contasReceberState.empresaNome, contasReceberState.empresaCnpj);
@@ -1194,7 +1181,7 @@ function renderServicosResult(rows, empresaNome, empresaCnpj){
     <div class="item"><div class="k">Conferir</div><div class="v">${nWarn}</div></div>
     <div class="item"><div class="k">Pendente</div><div class="v">${nErr}</div></div>
   </div>
-  <div class="help">Vermelho = falta CNPJ, título sem correspondência, ou recebimento sem título casado; amarelo = casou por soma exata mas fora da ordem estrita de emissão (confira). Campos editáveis.</div>
+  <div class="help">Vermelho = falta CNPJ, título sem correspondência, ou recebimento sem título casado; amarelo = casou por soma exata mas fora da ordem estrita de emissão (confira). Linhas esmaecidas (título aberto sem recebimento no mês) nunca entram no arquivo exportado — uma baixa sem data de baixa quebra a importação no Domínio. Campos editáveis.</div>
   <div class="table-wrap"><table class="preview"><thead><tr>
     <th>Nº Nota</th><th>CNPJ/CPF</th><th>Nome</th><th>Vencimento</th><th>Data Baixa</th><th>Valor Recebido</th><th>Juros</th><th>Multa</th><th>Desconto</th><th>PIS</th><th>COFINS</th><th>CSLL</th><th>IRRF</th><th>Status</th>
   </tr></thead><tbody>`;
@@ -1203,7 +1190,7 @@ function renderServicosResult(rows, empresaNome, empresaCnpj){
       html += `<tr class="err"><td colspan="13" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;">${fmtDateBR(r.data)} — ${fmtBRL(r.valor)} — ${r.historico}${r.nomeFrag?(" "+r.nomeFrag):""}</td><td>${r.statusText}</td></tr>`;
       return;
     }
-    const trCls = r.statusClass || "";
+    const trCls = (r.statusClass || "") + (r.naoExportar ? " excluded" : "");
     html += `<tr class="${trCls}">
       <td class="cell"><input class="cell-input" value="${r.numero}" onchange="updateServicoRow(${i},'numero',this.value)"></td>
       <td class="cell"><input class="cell-input wide" value="${r.cnpj}" onchange="updateServicoRow(${i},'cnpj',this.value)"></td>
@@ -1248,11 +1235,11 @@ function servicoRowArray(r){
 }
 function downloadServicosXlsx(){
   const header = ["Número da Nota","CPF/CNPJ do Cliente","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Recebido","Valor Juros","Valor Multa","Valor Desconto","Valor PIS","Valor COFINS","Valor CSLL","Valor IRRF"];
-  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo);
+  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo && !r.naoExportar);
   downloadXlsx("baixa_servicos.xlsx", [header, ...usaveis.map(servicoRowArray)], "Baixa");
 }
 function downloadServicosTxt(){
-  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo);
+  const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo && !r.naoExportar);
   const naoValidas = usaveis.filter(r=>{ const c=classifyDocumento(r.cnpj); return !c.valido; });
   if(naoValidas.length){
     if(!confirm(`${naoValidas.length} linha(s) ainda têm CNPJ/CPF ausente ou inválido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
