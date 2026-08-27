@@ -205,7 +205,14 @@ code{background:var(--paper);padding:1px 5px;border-radius:3px;font-family:'IBM 
     <div class="table-wrap"><table class="preview" id="ignorarTable"></table></div>
     <div class="btn-row">
       <button class="btn" onclick="addIgnorarRow()">+ Novo termo a ignorar</button>
-      <button class="btn ghost" onclick="toggleBancoJson()">Editar padrões especiais via JSON (Lisiane Rossi, tarifas)</button>
+    </div>
+
+    <div class="section-title" style="margin-top:20px;">Cadastro — Padrões de Débito/Crédito do Extrato</div>
+    <div class="help">De-para de palavra-chave (histórico/favorecido do extrato) → conta. Deixe "Conta Direcional" vazia pra um padrão simples (débito fixo, crédito é sempre a conta banco). Preencha "Conta Direcional" pra um padrão onde a MESMA conta muda de lado conforme o dinheiro sai ou entra (ex. empréstimo à sócia Lisiane Rossi) — nesse caso os históricos de saída/entrada só podem ser editados via JSON.</div>
+    <div class="table-wrap"><table class="preview" id="padroesBancoTable"></table></div>
+    <div class="btn-row">
+      <button class="btn" onclick="addPadraoBancoRow()">+ Novo padrão</button>
+      <button class="btn ghost" onclick="toggleBancoJson()">Editar padrões direcionais via JSON (Lisiane Rossi)</button>
     </div>
     <div id="bancoJsonBox" class="hidden" style="margin-top:10px;">
       <div class="help">Empréstimo à sócia Lisiane Rossi é <b>direcional</b> (mesma conta muda de lado conforme sai ou entra dinheiro). As tarifas bancárias são padrões simples (débito/crédito fixos).</div>
@@ -562,9 +569,42 @@ function salvarBancoJson(){
     if(!Array.isArray(parsed)) throw new Error("Precisa ser uma lista de padrões.");
     padroesBancoDB = parsed;
     savePadroesBanco(padroesBancoDB);
+    renderPadroesBancoTable();
     status.classList.add("ok"); status.textContent = "Padrões do extrato bancário salvos.";
   }catch(err){ status.classList.add("err"); status.textContent = "JSON inválido: " + err.message; }
 }
+// CRUD visual pros padrões simples (débito/crédito fixos); padrões direcionais (mesma conta
+// muda de lado conforme sai/entra) só ficam com uma descrição aqui — a edição continua
+// via JSON acima, igual ao padrão já usado nas outras ferramentas do Hub (ex. Bari).
+function renderPadroesBancoTable(){
+  const tbl = document.getElementById("padroesBancoTable");
+  tbl.innerHTML = `<thead><tr>
+      <th>Palavras-chave (histórico/favorecido)</th><th>Débito</th><th>Histórico</th><th></th>
+    </tr></thead><tbody>` +
+    padroesBancoDB.map((p,i)=>{
+      if(p.contaDirecional!=null){
+        return `<tr>
+          <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoBancoKeywords(${i},this.value)"></td>
+          <td colspan="2" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-soft);">Direcional: conta ${p.contaDirecional} (D quando sai, C quando entra) — edite via JSON</td>
+          <td><button class="btn small ghost" onclick="removePadraoBancoRow(${i})">✕</button></td>
+        </tr>`;
+      }
+      return `<tr>
+        <td class="cell"><input class="cell-input wide" value="${(p.keywords||[]).join(', ')}" onchange="updatePadraoBancoKeywords(${i},this.value)"></td>
+        <td class="cell"><input class="cell-input" style="width:70px" value="${p.debito??''}" onchange="updatePadraoBanco(${i},'debito',this.value)"></td>
+        <td class="cell"><input class="cell-input wide" value="${p.hist||''}" onchange="updatePadraoBanco(${i},'hist',this.value)"></td>
+        <td><button class="btn small ghost" onclick="removePadraoBancoRow(${i})">✕</button></td>
+      </tr>`;
+    }).join("") + `</tbody>`;
+}
+function updatePadraoBanco(i, field, val){
+  if(field==="debito"){ padroesBancoDB[i][field] = String(val).trim()===""?null:Number(val); }
+  else { padroesBancoDB[i][field] = val; }
+  savePadroesBanco(padroesBancoDB);
+}
+function updatePadraoBancoKeywords(i, val){ padroesBancoDB[i].keywords = val.split(",").map(s=>s.trim()).filter(Boolean); savePadroesBanco(padroesBancoDB); }
+function addPadraoBancoRow(){ padroesBancoDB.push({keywords:[], debito:null, credito:null, hist:""}); savePadroesBanco(padroesBancoDB); renderPadroesBancoTable(); }
+function removePadraoBancoRow(i){ padroesBancoDB.splice(i,1); savePadroesBanco(padroesBancoDB); renderPadroesBancoTable(); }
 
 /* =========================================================================
    PARSER 1 — CONTAS PAGAS (Excel): Fornecedor / Descrição / Valor / Data
@@ -878,6 +918,7 @@ function downloadLancTxt(){
 
 renderCategoriasTable();
 renderIgnorarTable();
+renderPadroesBancoTable();
 
 /* =========================================================================
    BAIXA DE SERVIÇOS — recebimentos de clientes (extrato × Contas a Receber)
