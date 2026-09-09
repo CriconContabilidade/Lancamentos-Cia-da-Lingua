@@ -1298,11 +1298,13 @@ function updateServicoRow(i, field, val){
     r.statusText = cl.valido ? (r.statusText||"OK") : "CNPJ/CPF inválido";
   }
 }
+// Série do Documento — coluna exigida pelo Domínio na baixa de serviços, logo após o
+// Número da Nota; é sempre "U", não varia por cliente/nota.
 function servicoRowArray(r){
-  return [r.numero, onlyDigits2(r.cnpj), fmtDateBR(r.vencimento), r.databaixa?fmtDateBR(r.databaixa):"", r.valor, r.juros, r.multa, r.desconto, r.pis, r.cofins, r.csll, r.irrf];
+  return [r.numero, "U", onlyDigits2(r.cnpj), fmtDateBR(r.vencimento), r.databaixa?fmtDateBR(r.databaixa):"", r.valor, r.juros, r.multa, r.desconto, r.pis, r.cofins, r.csll, r.irrf];
 }
 function downloadServicosXlsx(){
-  const header = ["Número da Nota","CPF/CNPJ do Cliente","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Recebido","Valor Juros","Valor Multa","Valor Desconto","Valor PIS","Valor COFINS","Valor CSLL","Valor IRRF"];
+  const header = ["Número da Nota","Série do Documento","CPF/CNPJ do Cliente","Data de Vencimento da Parcela","Data da Baixa da Parcela","Valor Recebido","Valor Juros","Valor Multa","Valor Desconto","Valor PIS","Valor COFINS","Valor CSLL","Valor IRRF"];
   const usaveis = servicosRowsState.filter(r=>!r.pendenteSemTitulo && !r.naoExportar);
   downloadXlsx("baixa_servicos.xlsx", [header, ...usaveis.map(servicoRowArray)], "Baixa");
 }
@@ -1312,7 +1314,7 @@ function downloadServicosTxt(){
   if(naoValidas.length){
     if(!confirm(`${naoValidas.length} linha(s) ainda têm CNPJ/CPF ausente ou inválido. Gerar mesmo assim (essas linhas provavelmente serão rejeitadas pelo Domínio)?`)) return;
   }
-  const lines = usaveis.map(r=> servicoRowArray(r).map((v,i)=> i>=4 ? fmtValorTxt(v) : v).join(";"));
+  const lines = usaveis.map(r=> servicoRowArray(r).map((v,i)=> i>=5 ? fmtValorTxt(v) : v).join(";"));
   downloadTextAnsi("baixa_ser.txt", lines.join("\r\n") + "\r\n");
 }
 
